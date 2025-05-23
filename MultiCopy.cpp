@@ -1,6 +1,4 @@
 // MultiCopy.cpp : This file contains the 'main' function. Program execution begins and ends there.
-//
-
 #include <iostream>
 #include <array>
 #include <condition_variable>
@@ -27,6 +25,7 @@ class SharedMemory
 public:
 	static constexpr std::streamsize BLOCK_SIZE = 1'000'000;
 	static constexpr std::streamsize BLOCK_NUM = 3;
+
 	struct Block {
 		char data[BLOCK_SIZE];
 		std::streamsize size;
@@ -40,9 +39,13 @@ public:
 	};
 
 	explicit SharedMemory(RoleCheck::Role role);
-	std::array<Block, BLOCK_NUM> GetPtr();
 	GuardedQueue GetEmptyBlocks();
 	GuardedQueue GetBlocksToWrite();
+
+private:
+	GuardedQueue emptyBlocks_;
+	GuardedQueue blocksToWrite_;
+	std::array<Block, BLOCK_NUM> blocks_; // used to fill EmptyBlocks at the program beginning.
 };
 
 int main()
@@ -54,7 +57,6 @@ int main()
 		std::cout << "maximum of two projects exist.\n";
 		return 0;
 	}
-
 	// Read command line parameters here.
 
 	SharedMemory sharedMemory(role);
@@ -69,6 +71,4 @@ int main()
 		// Writer code here.
 		std::cout << "Writer process started.\n";
 	}
-	// TODO: Remove following line.
-	std::cout << "Hello World!\n";
 }
