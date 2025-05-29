@@ -47,6 +47,7 @@ sequenceDiagram
 ```
 
 ## Do copy
+
 ```mermaid
 sequenceDiagram
     participant Reader 
