@@ -3,46 +3,71 @@
 Let's use one semaphore for both: Decidnig role and synchronizing shared memory creation.
 Let's prefer our API to not contein OS dependent object (like semaphore)
 
+## High level Inter-process communication
+
+```mermaid
+sequenceDiagram
+    participant Src as Source
+    participant Rd as Reader
+    participant Wt as Writer
+    participant Dest as Destination
+    
+    Rd ->> Src : Open
+    Wt ->> Dest : Create/open
+    par
+        loop
+            Src ->> Rd : Block
+            Rd ->> Wt : Block
+        end
+    and
+        loop
+            Wt ->> Dest : Block
+            Wt ->> Rd : Block (empty)
+        end
+    end
+```
+
+Notes: Reader amd writter are synchronized by semaphores. It's shown on later diagram.
+
 ## Decide process role
-
-Advantages: Clean interface for program.
-
-Disadvantages: Role knows SharedMemory.
-
-Maybe alternative: Role return OS-agnostic semaphore abstractions and program to give it to shared memory constructor together with role.
 
 ```mermaid
 sequenceDiagram
     participant Program
     participant Role
     participant AppCount as AppCount + IsReader Semaphore(start == 0, max == 1)
-    Participant SharedMemory
-    participant OS as OS(Windows)
     Program ->> Role: GetRole
-    Role ->>+ AppCount: CreateSemaphoreA 
+    Role ->>+ AppCount: Create
     alt
-        AppCount ->> Role: Handle ( == This thread is reader.)
-        Role ->> SharedMemory: Create
-        SharedMemory ->> OS: CreateFileMapping(INVALID_HANDLE_VALUE...
-        OS ->> SharedMemory : Handle
-        SharedMemory ->> Role: SharedMemory&
-        Role ->> Program: Role(Reader, SharedMemory&)
+        AppCount ->> Role: Created
+        Role ->> Program: Role(Reader)
         Role ->> AppCount: ReleaseSemaphore
-        AppCount ->> Role: Non-zero / success
     else
-        AppCount ->> Role: Handle + ERROR_ALREADY_EXISTS
+        AppCount ->> Role: Joined
         Role ->> AppCount: WaitForSingleObject(0.5 second)
         alt
-            AppCount ->> Role: Success == Signaled ( == This thread is writter)
-            Role ->> SharedMemory: GetExisting
-            SharedMemory ->> OS: OpenFileMapping(FILE_MAP_ALL_ACCESS, FALSE, szName);
-            OS ->> SharedMemory: Handle
-            SharedMemory ->> Role: SharedMemory&
-            Role ->> Program: Role(Writer, SharedMemory&)
+            AppCount ->> Role: Success == Signaled
+            Role ->> Program: Writer
         else
             AppCount ->> Role: Timeout
             Role ->>+ Program : Too many instances
         end
+    end
+```
+
+## Create shared memory object
+
+```mermaid
+sequenceDiagram
+    participant Program
+    participant DataTransfer
+    participant OS as OS(Windows)
+    Program ->> DataTransfer: Create
+    DataTransfer ->> OS : GetSharedMemoryBlock (CreateFileMapping(INVALID_HANDLE_VALUE...)
+    OS ->> DataTransfer : Handle + Pointer
+    DataTransfer -> Program : SaharedMemoryPtr
+    alt
+        Program ->> DataTransfer: ReaderInit
     end
 ```
 
@@ -52,11 +77,12 @@ sequenceDiagram
 sequenceDiagram
     participant Reader 
     participant Writer
-    participant Mem as SharedMemory
-    participant RdMem as ReaderInterface
-    participant WtMem as WriterInterface    
+    participant Mem as DataTransfer
+
     par
         Reader ->> Mem: GetReaderInterface
+        create participant RdMem as ReaderInterface
+        Mem -> RdMem : Create
         Mem ->> Reader: ReaderInterface&
         loop
             RdMem ->> Reader: Empty Block&
@@ -64,6 +90,8 @@ sequenceDiagram
         end
     and
         Writer ->> Mem: GetWritterInterface
+        create participant WtMem as WriterInterface
+        Mem -> WtMem : Create
         Mem ->> Writer: WriterInterface&
         loop
             WtMem ->> Writer: Data Block& + Size

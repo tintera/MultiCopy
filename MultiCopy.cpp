@@ -7,21 +7,50 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 #include <tchar.h> // For TCHAR and TEXT macro
+
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 
 using namespace std::literals::string_literals;
 
 namespace 
 {
-constexpr std::streamsize BLOCK_SIZE = 100; //1'000'000;
+constexpr std::streamsize BLOCK_SIZE = 1'000'000; //1'000'000;
 constexpr std::streamsize BLOCK_NUM = 3;
 wchar_t sharedMemoryOsName[] = L"MultiCopySharedMemory\0";
 auto EmptyBlocksSemaphoreName = "MultiCopyEmptyBlocksSemaphore"s;
 auto BlocsToWriteSemaphoreName = "MultiCopyBlocksToWriteSemaphore"s;
 
 class DataTransfer;
+
+std::string GetLastErrorMessage(const DWORD err)
+{
+	LPWSTR msgBuf = nullptr;
+	FormatMessageW(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		nullptr,
+		err,
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		(LPWSTR)&msgBuf,
+		0, nullptr);
+
+	std::wstring errorMsg = L"Failed to signal semaphore: " + std::to_wstring(err);
+	if (msgBuf) {
+		errorMsg += L" - ";
+		errorMsg += msgBuf;
+		LocalFree(msgBuf);
+	}
+	// Convert to UTF-8 for std::runtime_error
+	int size_needed = WideCharToMultiByte(CP_UTF8, 0, errorMsg.c_str(), -1, nullptr, 0, nullptr, nullptr);
+	std::string errorMsgUtf8(size_needed, 0);
+	WideCharToMultiByte(CP_UTF8, 0, errorMsg.c_str(), -1, &errorMsgUtf8[0], size_needed, nullptr, nullptr);
+	return errorMsgUtf8;
+}
 
 // OS-agnostic semaphore abstraction
 class Semaphore
@@ -35,7 +64,7 @@ public:
 		WaitFailed
 	};
 
-	explicit Semaphore(const std::string& name)
+	explicit Semaphore(const std::string& name) : name_(name)
 	{
 		const auto temp = std::wstring(name.begin(), name.end());
 		const LPCWSTR sw = temp.c_str();
@@ -46,9 +75,11 @@ public:
 			sw);                   // name of the semaphore
 		if (hSemaphore_ == nullptr)
 		{
+			spdlog::error("Failed to create semaphore {}: {}", name_, GetLastErrorMessage(GetLastError()));
 			throw std::runtime_error("Failed to create semaphore: " + std::to_string(GetLastError()));
 		}
 		creationResult_ = (GetLastError() == ERROR_ALREADY_EXISTS) ? CreationResult::Joined : CreationResult::Created;
+		spdlog::debug("Created semaphore: {}, creation result: {}", name_, (creationResult_ == CreationResult::Created) ? "Created" : "Joined");
 	}
 	enum class CreationResult : uint8_t
 	{
@@ -58,6 +89,7 @@ public:
 	};
 	~Semaphore()
 	{
+		spdlog::debug("Destroying semaphore: {}", name_);
 		if (hSemaphore_ != nullptr)
 		{
 			CloseHandle(hSemaphore_);
@@ -73,17 +105,21 @@ public:
 	}
 
 	// ReSharper disable once CppMemberFunctionMayBeConst // This function modifies underlying OS semaphore state.
-	void Signal()
+    void Signal()
 	{
-		if (!ReleaseSemaphore(hSemaphore_, 1, nullptr))
-		{
-			throw std::runtime_error("Failed to signal semaphore: " + std::to_string(GetLastError()));
-		}
-	}
+		spdlog::debug("Signaling semaphore: {}", name_);
+        if (!ReleaseSemaphore(hSemaphore_, 1, nullptr))
+        {
+            const DWORD err = GetLastError();
+			spdlog::error("Failed to signal semaphore {}: {}", name_, GetLastErrorMessage(err));
+            throw std::runtime_error(GetLastErrorMessage(err));
+        }
+    }
 
 	// ReSharper disable once CppMemberFunctionMayBeConst // This function modifies underlying OS semaphore state.
 	WaitResult Wait(const std::chrono::milliseconds timeout)
 	{
+		spdlog::debug("Waiting for semaphore: {}", name_);
 		switch (WaitForSingleObject(hSemaphore_, static_cast<DWORD>(timeout.count())))
 		{
 		case WAIT_OBJECT_0:
@@ -96,9 +132,15 @@ public:
 			return WaitResult::WaitFailed;
 		}
 	}
+
+	std::string GetName() const
+	{
+		return name_;
+	}
 private:
 	HANDLE hSemaphore_;
 	CreationResult creationResult_ = CreationResult::Unknown;
+	std::string name_;
 };
 
 struct Block {
@@ -161,6 +203,19 @@ private:
 	Role role_;
 };
 
+// Converts a UTF-8 std::string to a null-terminated std::vector<wchar_t>
+std::vector<wchar_t> StringToWChar(const std::string& str) {
+	int wlen = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+	if (wlen == 0) {
+		throw std::runtime_error("StringToWChar: MultiByteToWideChar failed");
+	}
+	std::vector<wchar_t> wstr(wlen);
+	if (MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, wstr.data(), wlen) == 0) {
+		throw std::runtime_error("StringToWChar: MultiByteToWideChar failed");
+	}
+	return wstr;
+}
+
 class DataTransfer
 {
 private:
@@ -169,8 +224,20 @@ private:
 	Semaphore emptyBlocksSemaphore_{ EmptyBlocksSemaphoreName };
 	Semaphore blocksToWriteSemaphore_{ BlocsToWriteSemaphoreName };
 public:
-	explicit DataTransfer()
+	// Call only one time in the beginning of the reading process.
+	void InitReading()
 	{
+		for (int i = 0; i < BLOCK_NUM; ++i)
+		{
+			emptyBlocksSemaphore_.Signal();
+		}
+	}
+
+	explicit DataTransfer(const char* sharedMemoryOSName)
+	{
+		const std::string memName{ sharedMemoryOSName };
+		auto wSharedMemoryOsName = StringToWChar(memName);
+
 		hMapping_ = CreateFileMapping(
 			INVALID_HANDLE_VALUE,    // use paging file
 			nullptr,                 // default security
@@ -211,10 +278,6 @@ public:
 			CloseHandle(hMapping_);
 			throw std::runtime_error("Failed to map view of file: " + std::to_string(GetLastError()));
 		}
-		for (int i = 0; i < BLOCK_NUM; ++i)
-		{
-			emptyBlocksSemaphore_.Signal();
-		}
 	}
 
 	DataTransfer(const DataTransfer&) = delete; // No copying allowed.
@@ -226,12 +289,12 @@ public:
 		// ReSharper disable once CppMemberFunctionMayBeConst // This function modifies the semaphore state. And that changes behavior of the object.
 		Block& GetBlock()
 		{
-			auto res = semaphoreIn_->Wait(std::chrono::milliseconds(500)); // No block released in 1/10th of second is considered as other side not working or broken pipeline.
+			auto res = semaphoreIn_->Wait(std::chrono::milliseconds(500)); // No block released in timeout is considered as other side not working or broken pipeline.
 			if (res == Semaphore::WaitResult::Signaled)
 			{
 				auto& shared = *shared_;
 				auto& counterIn = *counterIn_;
-				counterIn = (++counterIn) % 3;
+				counterIn = (++counterIn) % BLOCK_NUM;
 				return shared[counterIn];
 			}
 			throw std::runtime_error("Failed to get block: " + std::to_string(static_cast<int>(res)));
@@ -276,93 +339,100 @@ int main(const int argc, const char* const argv[])
 {
 	try
 	{
+		auto logger = spdlog::basic_logger_mt("file_logger", "shared_log.txt");
+		spdlog::set_default_logger(logger);
+		spdlog::set_level(spdlog::level::info);
 		const RoleCheck roleCheck{};
 		const auto role = roleCheck.GetRole();
 		if (role == RoleCheck::Role::Exit)
 		{
-			std::cout << "Maximum of two processes is allowed at same time. This one was decided to be third or more.\n";
+			spdlog::info("Maximum of two processes is allowed at same time. This one was decided to be third or more.");
 			return 0;
 		}
-		std::cout << "Role: " << (role == RoleCheck::Role::Reader ? "Reader" : "Writer") << '\n';
+		spdlog::info("Role: {}", (role == RoleCheck::Role::Reader) ? "Reader" : "Writer");
 
 		// Read command-line parameters here.
 		// Simplified parameter checking so we do not need to add dependencies.
-		if (argc < 3) {
-			std::cerr << "Usage: " << argv[0] << " <input_file> <output_file>\n";
+		spdlog::info("Command-line parameters: argc = {}, argv[0] = {}", argc, argv[0]);
+		if (argc != 4) {
+			spdlog::error("Usage: {} <input_file> <output_file> <shared_mem_name>", argv[0]);
 			return 1;
 		}
+
 		const char* inputFileName = argv[1];
 		const char* outputFileName = argv[2];
+		const char* sharedMemoryNameArg = argv[3];
 
 		std::ios::sync_with_stdio(false);
 
-
-		DataTransfer sharedMemory{}; // Create shared memory and semaphores.
+		DataTransfer dataTransfer{ sharedMemoryNameArg }; // Create shared memory and semaphores.
 
 		if (role == RoleCheck::Role::Reader)
 		{
 			// Reader code here.
-			std::cout << "Reader process started.\n";
+			spdlog::info("Reader process started.");
 
 			// open input file
 			std::ifstream inputFile(inputFileName, std::ios::binary);
 			if (!inputFile.is_open()) {
-				std::cerr << "Error: Could not open input file " << inputFileName << "\n";
+				spdlog::error("Error: Could not open input file {}.",  inputFileName);
 				return 1;
 			}
-
-			auto rdMem = sharedMemory.GetReaderInterface();
+			dataTransfer.InitReading();
+			auto rdMem = dataTransfer.GetReaderInterface();
 			bool finished = false;
 			do
 			{
 				auto& [data, size] = rdMem.GetBlock();
 
 				// Read from file into emptyBlock.
-				std::cout << "Loading a block.\n";
+				spdlog::info("Reading a block.");
 				inputFile.read(data, BLOCK_SIZE);
 				size = inputFile.gcount();
-				std::cout << "Loaded " << size << " bytes.\n";
+				spdlog::info("Loaded {} bytes.", size);
 				finished = (size != BLOCK_SIZE);
 
 				rdMem.SignalBlock();  // Allow processing of the loaded block
 			} while (!finished);
 			inputFile.close();
+			spdlog::warn("File reading finished.");
 		}
 		if (role == RoleCheck::Role::Writer)
 		{
 			// Writer code here.
-			std::cout << "Writer process started.\n";
+			spdlog::warn("Writer process started.");
 
 			// open output file
 			std::ofstream outputFile(outputFileName, std::ios::binary);
 			if (!outputFile.is_open()) {
-				std::cerr << "Error: Could not open output file " << outputFileName << "\n";
+				spdlog::error("Error: Could not open output file {}.", outputFileName);
 				return 1;
 			}
 
-			auto wrMem = sharedMemory.GetWriterInterface();
+			DataTransfer::DataTransferInterface wrMem = dataTransfer.GetWriterInterface();
 			bool finished = false;
 			do // last block has full size
 			{
 				auto& [data, size] = wrMem.GetBlock();
 
 				// Write to file from block.
-				std::cout << "Writing a block.\n";
+				spdlog::warn("Writing a block.");
 				outputFile.write(data, size);
-				std::cout << "Wrote " << size << " bytes.\n";
+				spdlog::warn("Wrote {} bytes.", size);
 				finished = (size != BLOCK_SIZE);
 
 				wrMem.SignalBlock();
 				finished = (size < BLOCK_SIZE);
 			} while (!finished /*write not finished*/);
 			outputFile.close();
+			spdlog::warn("File saved");
 		}
-		std::cout << "File copied.\n";
+		return EXIT_SUCCESS;
 	}
 	catch (std::exception& e)
 	{
-		std::cerr << "Exception: " << e.what() << '\n';
-		return 1;
+		spdlog::error("Exception: {}", e.what());
+		return EXIT_FAILURE;
 	}
 	catch (...)
 	{
@@ -372,14 +442,12 @@ int main(const int argc, const char* const argv[])
 
 // Note: This code is a simplified example and may require additional error handling and cleanup in a production environment.
 // It is designed to demonstrate the use of shared memory and semaphores for inter-process communication in a Windows environment.
-// For production also consider using a more sophisticated error handling mechanism, such as logging errors to a file or using a custom exception class.
 
 // The code assumes that the reader and writer processes will be run separately and that they will communicate through the shared memory.
 // The shared memory is created with a fixed size and the blocks are used to transfer data between the reader and writer.
 // Note: This code is specific to Windows due to the use of Windows API for shared memory and semaphores.
 // To compile this code, you need to link against the Windows libraries.
 // But it's used the way it allows OS-agnostic code to be written, so it can be used in a cross-platform project.
-// The code uses C++ standard library features for file I/O and exception handling.
 // The BLOCK_SIZE and BLOCK_NUM constants define the size of each block and the number of blocks used for data transfer.
 
 // Possible optimizations:

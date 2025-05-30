@@ -21,5 +21,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="README.md" />
+    <None Include="x64\Debug\runTwice.bat">
+      <Filter>Source Files</Filter>
+    </None>
   </ItemGroup>
 </Project>
