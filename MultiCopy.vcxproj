@@ -130,6 +130,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="DataTransfer.cpp" />
+    <ClCompile Include="LoggingIfStream.cpp" />
+    <ClCompile Include="LoggingOfstream.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="RoleCheck.cpp" />
     <ClCompile Include="Semaphore.cpp" />
@@ -142,6 +144,8 @@
   <ItemGroup>
     <ClInclude Include="Block.h" />
     <ClInclude Include="DataTransfer.h" />
+    <ClInclude Include="LoggingIfStream.h" />
+    <ClInclude Include="LoggingOfstream.h" />
     <ClInclude Include="RoleCheck.h" />
     <ClInclude Include="Semaphore.h" />
   </ItemGroup>

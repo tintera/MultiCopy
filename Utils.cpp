@@ -9,7 +9,7 @@ std::string GetLastErrorMessage(const DWORD err) {
         nullptr,
         err,
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPWSTR)&msgBuf,
+        reinterpret_cast<LPWSTR>(&msgBuf),
         0, nullptr);
 
     std::wstring errorMsg;

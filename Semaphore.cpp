@@ -43,9 +43,19 @@ void Semaphore::Signal() {
     }
 }
 
-Semaphore::WaitResult Semaphore::Wait(const std::chrono::milliseconds timeout) {
+Semaphore::WaitResult Semaphore::Wait(const std::chrono::milliseconds wait) {
     spdlog::debug("Waiting for semaphore: {}", name_);
-    switch (WaitForSingleObject(hSemaphore_, static_cast<DWORD>(timeout.count()))) {
+    switch (WaitForSingleObject(hSemaphore_, static_cast<DWORD>(wait.count()))) {
+    case WAIT_OBJECT_0: return WaitResult::Signaled;
+    case WAIT_ABANDONED: return WaitResult::WaitAbandoned;
+    case WAIT_TIMEOUT: return WaitResult::Timeout;
+    default: return WaitResult::WaitFailed;
+    }
+}
+
+Semaphore::WaitResult Semaphore::Wait() {
+    spdlog::debug("Waiting for semaphore: {}", name_);
+    switch (WaitForSingleObject(hSemaphore_, INFINITE)) {
     case WAIT_OBJECT_0: return WaitResult::Signaled;
     case WAIT_ABANDONED: return WaitResult::WaitAbandoned;
     case WAIT_TIMEOUT: return WaitResult::Timeout;

@@ -8,8 +8,8 @@
 
 using namespace std::literals::string_literals;
 
-std::string EmptyBlocksSemaphoreName = "MultiCopyEmptyBlocksSemaphore"s;
-std::string BlocsToWriteSemaphoreName = "MultiCopyBlocksToWriteSemaphore"s;
+std::string EmptyBlocksSemaphoreName = "MultiCopyEmptyBlocksSemaphore_"s;
+std::string BlocsToWriteSemaphoreName = "MultiCopyBlocksToWriteSemaphore_"s;
 
 DataTransfer::DataTransfer(DataTransfer&& other) noexcept: sharedMemory_{other.sharedMemory_},
                                                            emptyBlocksSemaphore_{std::move(other.emptyBlocksSemaphore_)},
@@ -18,20 +18,17 @@ DataTransfer::DataTransfer(DataTransfer&& other) noexcept: sharedMemory_{other.s
 {
 }
 
-void DataTransfer::InitReading()
+DataTransfer::~DataTransfer()
 {
-	for (int i = 0; i < BLOCK_NUM; ++i)
-	{
-		sharedMemory_->blocks[i].size = 0; // Initialize all blocks to empty.
-		sharedMemory_->blocks[i].id = i; // Assign unique ID to each block.
-		emptyBlocksSemaphore_.Signal();
-	}
+	spdlog::debug("Going to release shared memory.");
+	UnmapViewOfFile(&sharedMemory_);
+	CloseHandle(hMapping_);
+	spdlog::debug("Shared memory released.");
 }
 
-DataTransfer::DataTransfer(const char* sharedMemoryOSName)
+DataTransfer::DataTransfer(const std::string& sharedMemoryOSName, RoleCheck::Role role) : name_(sharedMemoryOSName)
 {
-	const std::string memName{ sharedMemoryOSName };
-	auto sharedMemoryOsName = StringToWChar(memName);
+	const auto sharedMemoryOsName = StringToWChar(sharedMemoryOSName);
 
 	hMapping_ = CreateFileMapping(
 		INVALID_HANDLE_VALUE,    // use paging file
@@ -48,33 +45,61 @@ DataTransfer::DataTransfer(const char* sharedMemoryOSName)
 		const std::string errorMessage = std::format("Failed to create file mapping: {} - {}.", std::to_string(errCode), systemMessage);
 		throw std::runtime_error(errorMessage);
 	}
-	sharedMemory_ = static_cast<SharedMemory*>(MapViewOfFile(
+	void* memPtr = MapViewOfFile(
 		hMapping_,
 		FILE_MAP_ALL_ACCESS, // read/write access
 		0,
 		0,
-		sizeof(SharedMemory)));
-	if (sharedMemory_ == nullptr)
+		sizeof(SharedMemory));
+	if (memPtr == nullptr)
 	{
 		CloseHandle(hMapping_);
 		throw std::runtime_error("Failed to map view of file: " + std::to_string(GetLastError()));
 	}
+	// Prevent double init
+	sharedMemory_ = role == RoleCheck::Role::Reader ? new (memPtr) SharedMemory() : static_cast<SharedMemory*>(memPtr);
 }
 
-DataTransfer::DataTransferInterface::DataTransferInterface(BlocksArray* shared, int* counterIn, Semaphore* semaphoreIn,
-                                                           Semaphore* semaphoreOut): shared_(shared), counterIn_(counterIn), semaphoreIn_(semaphoreIn), semaphoreOut_(semaphoreOut)
+void DataTransfer::InitReading()
+{
+	for (int i = 0; i < BLOCK_NUM; ++i)
+	{
+		sharedMemory_->blocks[i].error = false;
+		emptyBlocksSemaphore_.Signal();
+	}
+}
+
+std::string DataTransfer::GetName()
+{
+	return name_;
+}
+
+DataTransfer::DataTransferInterface::DataTransferInterface(
+	BlocksArray* blocks,
+	int* counterIn,
+	Semaphore* semaphoreIn,
+	Semaphore* semaphoreOut) :
+	shared_(blocks),
+	counterIn_(counterIn),
+	semaphoreIn_(semaphoreIn),
+	semaphoreOut_(semaphoreOut)
 {}
 
 // ReSharper disable once CppMemberFunctionMayBeConst // This function modifies the semaphore state. And that changes behavior of the object.
 Block& DataTransfer::DataTransferInterface::GetBlock()
 {
-	auto res = semaphoreIn_->Wait(std::chrono::milliseconds(500)); // No block released in timeout is considered as other side not working or broken pipeline.
+	auto res = semaphoreIn_->Wait(); // No block released in timeout is considered as other side not working or broken pipeline.
 	if (res == Semaphore::WaitResult::Signaled)
 	{
 		auto& shared = *shared_;
 		auto& counterIn = *counterIn_;
-		counterIn = (++counterIn) % BLOCK_NUM;
-		return shared[counterIn];
+		Block& block = shared[counterIn++ % BLOCK_NUM];
+		if (block.error)
+		{
+			spdlog::debug("Error found in block #{}.", block.id);
+			throw("Detected error in the other process.");
+		}
+		return block;
 	}
 	throw std::runtime_error("Failed to get block: " + std::to_string(static_cast<int>(res)));
 }
@@ -87,10 +112,10 @@ void DataTransfer::DataTransferInterface::SignalBlock()
 
 DataTransfer::DataTransferInterface DataTransfer::GetReaderInterface()
 {
-	return DataTransferInterface(&sharedMemory_->blocks, &sharedMemory_->NextReadBlock, &emptyBlocksSemaphore_, &blocksToWriteSemaphore_);
+	return DataTransferInterface(&(sharedMemory_->blocks), &sharedMemory_->NextReadBlock, &emptyBlocksSemaphore_, &blocksToWriteSemaphore_);
 }
 
 DataTransfer::DataTransferInterface DataTransfer::GetWriterInterface()
 {
-	return DataTransferInterface(&sharedMemory_->blocks, &sharedMemory_->NextWriteBlock, &blocksToWriteSemaphore_, &emptyBlocksSemaphore_);
+	return DataTransferInterface(&(sharedMemory_->blocks), &sharedMemory_->NextWriteBlock, &blocksToWriteSemaphore_, &emptyBlocksSemaphore_);
 }

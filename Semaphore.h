@@ -25,7 +25,8 @@ public:
     };
     [[nodiscard]] CreationResult Created() const;
     void Signal();
-    WaitResult Wait(const std::chrono::milliseconds timeout);
+    WaitResult Wait(std::chrono::milliseconds wait);
+	WaitResult Wait();
     [[nodiscard]] std::string GetName() const;
 private:
     HANDLE hSemaphore_;
