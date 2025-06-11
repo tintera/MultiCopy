@@ -97,7 +97,7 @@ Block& DataTransfer::DataTransferInterface::GetBlock()
 		if (block.error)
 		{
 			spdlog::debug("Error found in block #{}.", block.id);
-			throw("Detected error in the other process.");
+			throw std::runtime_error("Detected error in the other process.");
 		}
 		return block;
 	}

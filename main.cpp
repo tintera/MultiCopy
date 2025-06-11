@@ -30,7 +30,7 @@ namespace
 			if (inputFile.fail()) {
 				const std::string errorMessage = std::format("Failed to read from file: {}: {}", inputFileName, GetLastErrorMessage(errno));
 				inputFile.close();
-				throw std::ios_base::failure(errorMessage);
+				throw std::runtime_error(errorMessage);
 			}
 		}
 		block.size = inputFile.gcount();
@@ -197,7 +197,7 @@ int main(const int argc, const char* const argv[]) {
 		spdlog::shutdown();
 		return resultCode;
 	}
-	catch (std::exception& e)
+	catch (std::runtime_error& e)
 	{
 		spdlog::error("Exception: {}", e.what());
 		spdlog::shutdown();
